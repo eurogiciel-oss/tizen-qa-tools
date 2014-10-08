@@ -1,0 +1,229 @@
+#!/usr/bin/node
+
+/* qamanager tool to launch packaged Tizen test suite from a host
+ *
+ */
+
+// set configuration
+var fs     = require('fs');
+var path   = require('path');
+var QA     = require('libqa');
+var TOPDIR = path.resolve(path.join(path.dirname(__filename),".."));
+var CFGDIR = path.resolve(path.join(TOPDIR,"etc"));
+var config = new QA.Config(CFGDIR)
+var suites = '' // string that represent the list of the suites to launch
+
+
+console.log(config);
+console.log(QA);
+
+
+// define loggers
+var log4js = require('log4js');
+logger_qamanager = log4js.getLogger('qamanager');
+logger_target = log4js.getLogger('target');
+logger_qamanager.setLevel('DEBUG');
+
+
+// define connection and argument parser objects
+var Connection = require('ssh2');
+var ArgumentParser = require('argparse').ArgumentParser;
+
+
+function check_target(targetsobj, target){
+	if (targetsobj.hasOwnProperty(target)){
+		logger_qamanager.info('Target ' + target + ' is defined')
+	}
+	else {
+		logger_qamanager.error('Target ' + target + ' is not defined !');
+		process.exit(1);
+	}
+}
+
+function check_suite(suitesobj, suite){
+	if (suitesobj.hasOwnProperty(suite)){
+		logger_qamanager.info('Suite ' + suite + ' is defined')
+	}
+	else {
+		logger_qamanager.error('Suite ' + suite + ' is not defined !');
+		process.exit(1);
+	}
+}
+
+function check_report(reportsobj, report){
+	if (report === null){
+		logger_qamanager.info('No report defined !')
+	}
+	else {
+		if (reportsobj.hasOwnProperty(report)){
+			logger_qamanager.info('Report ' + report + ' is defined');
+		}
+		else {
+			logger_qamanager.error('Report ' + report + ' is not defined !');
+			process.exit(1)
+		}
+	}
+}
+
+function getFile(connect, remote, local, cb){
+	logger_qamanager.error("-- In the getfile function --");
+	connect.sftp(function (err, sftp) {
+		if (err) throw err;
+		sftp.fastGet(remote, local, {}, function(err) {
+			if (err) {
+				logger_qamanager.error("cannot upload the result file");
+			}
+			else{
+				logger_qamanager.info("result file successfully uploaded");
+			}
+			if (cb) cb(err);
+		});
+	});
+};
+
+function create_local_resdir(resdir){
+	if (! fs.existsSync(resdir)){
+		fs.mkdirSync(resdir);
+		logger_qamanager.info("result directory succressfully created : " + resdir);
+	}
+	else {
+		logger_qamanager.info("result directory already exists : " + resdir);
+	}
+}
+
+function clean_directory(resdir){
+	logger_qamanager.info("cleaning result directory");
+	if (fs.existsSync(resdir)){
+		fs.readdirSync(resdir).forEach(function(file, index){	
+			var currentPath = path.join(resdir, file);
+			if (fs.lstatSync(currentPath).isDirectory()){
+				clean_directory(currentPath);
+			}
+			else {
+				fs.unlinkSync(currentPath);
+			}
+		});
+	}
+}
+
+
+var parser = new ArgumentParser({
+    version: '1.0.0',
+    addHelp: true,
+    description: 'Tool to launch packaged test suites on a Tizen Profile'
+});
+
+parser.addArgument(
+    ['-t', '--target'],
+    {
+	help: 'Target host (declared in etc/hwtargets.conf',
+	dest: 'target',
+	required: true
+    }
+);
+
+parser.addArgument(
+    ['-s', '--suite'],
+    {
+	help: 'Test suites to launch',
+	nargs: '+',
+	dest: 'suite'
+    }
+);
+
+parser.addArgument(
+    ['-r', '--report'],
+    {
+	help: 'Type of reporting (declared in etc/test_reports.conf)',
+	dest: 'report'
+    }
+);
+
+
+var args = parser.parseArgs();
+console.dir(args);
+
+// create the result directory
+//create_local_resdir(path.dirname(QA.GLOBALS.local_txtres));
+
+// clean the result directory
+//clean_directory(path.dirname(QA.GLOBALS.local_txtres));
+
+
+// checking consistency of the given arguments
+check_target(config.HWTARGETS, args.target);
+args.suite.forEach(function (element, index, array){
+	check_suite(config.PROFILES, element);
+	suites += ' ' + config.PROFILES[element].name
+});
+check_report(config.REPORTS, args.report)
+
+
+// connection and credential objects
+conn = new Connection();
+conn_data = {
+	host: config.HWTARGETS[args.target].ip_address,
+	port: QA.GLOBALS.default_port,
+	username: QA.GLOBALS.default_user,
+	privateKey: fs.readFileSync(path.resolve(CFGDIR, QA.GLOBALS.default_key))
+};
+
+
+CMD_INSTALL = 'zypper -n in ' + suites;
+CMD_LAUNCH  = 'common-suite-launcher launch --suites' + suites
+
+
+conn.on('ready', function() {
+
+	logger_qamanager.debug('Connection to target :: ready');
+
+	logger_qamanager.info('Installing required test suites : ' + suites);
+	conn.exec(CMD_INSTALL, function(err, stream) {
+		if (err) throw err;
+		stream.on('exit', function(code, signal) {
+			if(code === 0){
+				logger_target.debug('Installation succeeded');
+				logger_target.info('Launching the test suites');
+				conn.exec(CMD_LAUNCH, function(err, stream) {
+        			if (err) throw err;
+        			stream.on('exit', function(code, signal) {
+            			if (code === 0) {
+                			logger_target.debug('Test suites successfully executed');
+							var ndl = 2;
+							function dlend(err) {
+								ndl--;
+								if (ndl == 0){
+									conn.end()
+								}
+							}
+							getFile(conn, QA.GLOBALS.remote_txtres, QA.GLOBALS.local_txtres, dlend);
+							getFile(conn, QA.GLOBALS.remote_xmlres, QA.GLOBALS.local_xmlres, dlend);
+						}
+            			else{
+                			logger_target.error('Cannot execute the tests');
+                			logger_target.error('Exit code: ' + code + ', Signal: ' + signal);
+							conn.end();
+							process.exit(1)
+            			}
+        			}).on('data', function(data) {
+            			logger_target.info((''+data).replace('\n',''));
+            		}).stderr.on('data', function(data) {
+                		logger_target.error(''+data).replace('\n','');
+        			});
+				});
+			}
+			else {
+				logger_target.error('Cannot install the test suites packages !');
+				logger_target.error('Exit code: ' + code + ', Signal: ' + signal);
+				conn.end();
+				process.exit(1);
+			}
+		}).on('data', function(data) {
+			logger_target.info((''+data).replace('\n',''));
+		}).stderr.on('data', function(data) {
+			logger_target.error(''+data).replace('\n','');
+		});
+    });
+});
+
+conn.connect(conn_data);
