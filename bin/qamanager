@@ -141,13 +141,12 @@ parser.addArgument(
 
 
 var args = parser.parseArgs();
-console.dir(args);
 
 // create the result directory
-//create_local_resdir(path.dirname(QA.GLOBALS.local_txtres));
+create_local_resdir(path.dirname(QA.GLOBALS.local_txtres));
 
 // clean the result directory
-//clean_directory(path.dirname(QA.GLOBALS.local_txtres));
+clean_directory(path.dirname(QA.GLOBALS.local_txtres));
 
 
 // checking consistency of the given arguments
@@ -168,7 +167,7 @@ conn_data = {
 	privateKey: fs.readFileSync(path.resolve(CFGDIR, QA.GLOBALS.default_key))
 };
 
-
+// commands to launch on the target device
 CMD_INSTALL = 'zypper -n in ' + suites;
 CMD_LAUNCH  = 'common-suite-launcher launch --suites' + suites
 
