@@ -12,10 +12,11 @@ var TOPDIR = path.resolve(path.join(path.dirname(__filename),".."));
 var CFGDIR = path.resolve(path.join(TOPDIR,"etc"));
 var config = new QA.Config(CFGDIR)
 var suites = '' // string that represent the list of the suites to launch
-
+var script = path.join(TOPDIR, "bin", QA.GLOBALS.local_script)
 
 console.log(config);
 console.log(QA);
+console.log(script);
 
 
 // define loggers
@@ -30,12 +31,14 @@ var Connection = require('ssh2');
 var ArgumentParser = require('argparse').ArgumentParser;
 
 
-function check_target(targetsobj, target){
-	if (targetsobj.hasOwnProperty(target)){
-		logger_qamanager.info('Target ' + target + ' is defined')
+// -------------- arguments validation functions -------------- //
+function check_target(target_ip){
+	var ipformat = /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+	if (target_ip.match(ipformat)){
+		logger_qamanager.info('Target device ip : ' + target_ip);
 	}
 	else {
-		logger_qamanager.error('Target ' + target + ' is not defined !');
+		logger_qamanager.error(target_ip + ' is not a valid ip address');
 		process.exit(1);
 	}
 }
@@ -65,13 +68,14 @@ function check_report(reportsobj, report){
 	}
 }
 
+// --------------- file transfert functions ------------------ //
 function getFile(connect, remote, local, cb){
-	logger_qamanager.error("-- In the getfile function --");
 	connect.sftp(function (err, sftp) {
 		if (err) throw err;
 		sftp.fastGet(remote, local, {}, function(err) {
 			if (err) {
 				logger_qamanager.error("cannot upload the result file");
+				process.exit(1);
 			}
 			else{
 				logger_qamanager.info("result file successfully uploaded");
@@ -79,8 +83,61 @@ function getFile(connect, remote, local, cb){
 			if (cb) cb(err);
 		});
 	});
-};
+}
 
+function putFile(connect, local, remote, mode, cb) {
+	connect.sftp(function(err, sftp) {
+		if (err) throw err;
+		sftp.fastPut(local, remote, {}, function(err) {
+			if (err) {
+				logger_qamanager.error("cannot push file to the target device");
+				process.exit(1);
+			}
+			else {
+				logger_qamanager.info("file successfully uploaded");
+			}
+			sftp.chmod(remote, mode, function(err) {
+				if (err) {
+					throw err;
+					logger_qamanager.error("cannot set permimission");
+				}
+				else {
+					logger_qamanager.debug("permissions successfully set to file");
+				}
+			});
+			if (cb) cb(err);
+		});
+	});
+}
+
+function getPlatformInfos(tizenconf){
+	var content = fs.readFileSync(tizenconf);
+
+	if (!content) {
+		logger_qamanager.error("Invalid tizen platform config file : " + tizenconf);
+		process.exit(1);
+	}
+	try {
+		content = JSON.parse(content);
+	}
+	catch(e){
+		logger_qamanager.error("Unable to parse config file : " + tizenconf);
+		throw e;
+		process.exit(1);
+	}
+	if (typeof content != 'object'){
+		logger_qamanager.error("Invalid configuration in " + tizenconf + " (not and object as expected)");
+		throw new Error("Invalid configuration "+this.configfile);
+		process.exit(1);
+	}
+
+	logger_qamanager.info("Successfully parsed tizen platform conf file");
+
+	return content;
+}
+
+
+// -------------- preparation functions ---------------- //
 function create_local_resdir(resdir){
 	if (! fs.existsSync(resdir)){
 		fs.mkdirSync(resdir);
@@ -116,7 +173,7 @@ var parser = new ArgumentParser({
 parser.addArgument(
     ['-t', '--target'],
     {
-	help: 'Target host (declared in etc/hwtargets.conf',
+	help: 'IP address of the target device to test',
 	dest: 'target',
 	required: true
     }
@@ -150,7 +207,7 @@ clean_directory(path.dirname(QA.GLOBALS.local_txtres));
 
 
 // checking consistency of the given arguments
-check_target(config.HWTARGETS, args.target);
+check_target(args.target);
 args.suite.forEach(function (element, index, array){
 	check_suite(config.PROFILES, element);
 	suites += ' ' + config.PROFILES[element].name
@@ -161,21 +218,21 @@ check_report(config.REPORTS, args.report)
 // connection and credential objects
 conn = new Connection();
 conn_data = {
-	host: config.HWTARGETS[args.target].ip_address,
+	host: args.target,
 	port: QA.GLOBALS.default_port,
 	username: QA.GLOBALS.default_user,
 	privateKey: fs.readFileSync(path.resolve(CFGDIR, QA.GLOBALS.default_key))
 };
 
 // commands to launch on the target device
-CMD_INSTALL = 'zypper -n in ' + suites;
+CMD_INSTALL = 'zypper -n in ' + suites + ' dmidecode';
 CMD_LAUNCH  = 'common-suite-launcher launch --suites' + suites
 
 
 conn.on('ready', function() {
 
 	logger_qamanager.debug('Connection to target :: ready');
-
+	putFile(conn, script, QA.GLOBALS.remote_script, "700");
 	logger_qamanager.info('Installing required test suites : ' + suites);
 	conn.exec(CMD_INSTALL, function(err, stream) {
 		if (err) throw err;
@@ -192,7 +249,29 @@ conn.on('ready', function() {
 							function dlend(err) {
 								ndl--;
 								if (ndl == 0){
-									conn.end()
+									conn.exec(QA.GLOBALS.remote_script, function(err, stream) {
+										if (err) throw err;
+										stream.on('exit', function (code, signal) {
+											if (code == 0) {
+												logger_target.debug('remote script successfully executed');
+											}
+											else {
+												 logger_target.error('Cannot execute the tests');
+												 logger_target.error('Exit code: ' + code + ', Signal: ' + signal);
+												 conn.end();
+												 process.exit(1);
+											}
+										}).on('data', function(data) {
+											//logger_qamanager.debug((''+data).replace('\n',''));
+											fs.writeFile(QA.GLOBALS.local_tzplconf, data, null, function(err) {
+												if (err) throw err;
+												platformconf = getPlatformInfos(QA.GLOBALS.local_tzplconf);
+												console.log (platformconf);
+											});
+										}).stderr.on('data', function (data) {
+											logger_target.error((''+data).replace('\n',''));
+										});
+									});
 								}
 							}
 							getFile(conn, QA.GLOBALS.remote_txtres, QA.GLOBALS.local_txtres, dlend);
