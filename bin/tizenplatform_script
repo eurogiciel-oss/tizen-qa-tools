@@ -1,0 +1,30 @@
+#!/bin/bash
+
+source /etc/tizen-build.conf
+
+function getdmi_info() {
+	for x in $@; do
+		value=$(dmidecode -s $x | sed -r -e 's|^#.*$||g' -e 's/^[.]+$//g' -e 's|"|\\"|g'| grep -v '^$' 2>/dev/null)
+		[[ -n "$value" ]] && { echo $value; return 0; }
+	done
+	return 1
+}
+
+cat <<EOF 
+{
+	"platform" : {
+		"cpu": "$(getdmi_info processor-version)",
+		"manufacturer": "$(getdmi_info system-manufacturer chassis-manufacturer baseboard-manufacturer)",
+		"model": "$(getdmi_info system-product-name baseboard-product-name)",
+		"version": "$(getdmi_info system-version baseboard-version)"
+	},
+	"tizenos" : {
+		"build_arch" : "$(echo $TZ_BUILD_ARCH)",
+		"build_repo" : "$(echo $TZ_BUILD_REPO)",
+		"build_id" : "$(echo $TZ_BUILD_ID)",
+		"build_snapshot_url" : "$(echo $TZ_BUILD_SNAPSHOT_URL)"
+	}
+}
+EOF
+
+exit 0
