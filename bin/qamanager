@@ -5,14 +5,15 @@
  */
 
 // set configuration
-var fs     = require('fs');
-var path   = require('path');
-var QA     = require('libqa');
-var TOPDIR = path.resolve(path.join(path.dirname(__filename),".."));
-var CFGDIR = path.resolve(path.join(TOPDIR,"etc"));
-var config = new QA.Config(CFGDIR)
-var suites = '' // string that represent the list of the suites to launch
-var script = path.join(TOPDIR, "bin", QA.GLOBALS.local_script)
+var fs      = require('fs');
+var path    = require('path');
+var restler = require('restler');
+var QA      = require('libqa');
+var TOPDIR  = path.resolve(path.join(path.dirname(__filename),".."));
+var CFGDIR  = path.resolve(path.join(TOPDIR,"etc"));
+var config  = new QA.Config(CFGDIR)
+var suites  = '' // string that represent the list of the suites to launch
+var script  = path.join(TOPDIR, "bin", QA.GLOBALS.local_script)
 
 console.log(config);
 console.log(QA);
@@ -110,6 +111,8 @@ function putFile(connect, local, remote, mode, cb) {
 	});
 }
 
+//---------- get the tizen platform conf -------------///
+
 function getPlatformInfos(tizenconf){
 	var content = fs.readFileSync(tizenconf);
 
@@ -136,7 +139,71 @@ function getPlatformInfos(tizenconf){
 	return content;
 }
 
+// ----------- function to send the test report ------------ //
+function sendReport(tzplconf, suiteprofilelist, reportprofile, connection) {
+	var objectives = "";
+	suiteprofilelist.forEach(function (element, index) {
+		objectives += "*" + config.PROFILES[element].objective + "\n";
+	});
+	var reportinfos = {
+		build_id: tzplconf.tizenos.build_id,
+		build_txt: "[["+ path.join(tzplconf.tizenos.build_snapshot_url, tzplconf.tizenos.build_id, "repos", tzplconf.tizenos.build_repo) + "]]",
+		hwproduct: tzplconf.platform.manufacturer + ' ' + tzplconf.platform.model,
+		auth_token: reportprofile.auth_token,
+		release_version: reportprofile.release_version,
+		target: reportprofile.target,
+		testtype: "Automated tests",
+		title: "Test report - Snapshot : " + tzplconf.tizenos.build_id,
+		environment_txt: [
+			reportprofile.environment_header,
+			"",
+			"=== '''Image''' ===",
+			"* Snapshot: " + tzplconf.tizenos.build_id,
+			"* Buid arch: " + tzplconf.tizenos.build_arch,
+			"* Buid repo: " + tzplconf.tizenos.build_repo,
+			"* Source: " + "[["+ path.join(tzplconf.tizenos.build_snapshot_url, tzplconf.tizenos.build_id, "repos", tzplconf.tizenos.build_repo) + "]]",
+			"",
+			"=== '''HW Target''' ===",
+			"* CPU: " + tzplconf.platform.cpu,
+			"* Manufacturer: " + tzplconf.platform.manufacturer,
+			"* Model: " + tzplconf.platform.model,
+			"* Version: " + tzplconf.platform.version,
+			""
+		].filter(function(k){return (k!==null)}).join("\n"),
+		objective_txt: objectives,
+		qa_summary_txt: "",
+		issue_summary_txt: "-",
+	};
 
+	var request = restler.post(reportprofile.server + '/api/import' ,
+		{
+			method: "POST" ,
+			multipart: true ,
+			query: reportinfos ,
+			data: {
+				'report.1': restler.file(QA.GLOBALS.local_xmlres, null, fs.statSync(QA.GLOBALS.local_xmlres).size, null, 'application/xml')
+			}
+		}
+	);
+
+	request.on('complete',
+		function(result, response){
+			if (result instanceof Error){
+				logger_qamanager.error("Error : cannot upload the test results to the server")
+				process.exit(1);
+			}
+			if (response.statusCode == 200){
+				logger_qamanager.info("Report successfully uploaded");
+				logger_qamanager.debug("Status : "+ response.statusCode);
+				conn.end();
+			}
+			else {
+				logger_qamanager.error("Bad exit status for upload : " + response.statusCode);
+				process.exit(1)
+			}
+		}
+	);
+}
 // -------------- preparation functions ---------------- //
 function create_local_resdir(resdir){
 	if (! fs.existsSync(resdir)){
@@ -198,6 +265,7 @@ parser.addArgument(
 
 
 var args = parser.parseArgs();
+console.log(args);
 
 // create the result directory
 create_local_resdir(path.dirname(QA.GLOBALS.local_txtres));
@@ -225,8 +293,8 @@ conn_data = {
 };
 
 // commands to launch on the target device
-CMD_INSTALL = 'zypper -n in ' + suites + ' dmidecode';
-CMD_LAUNCH  = 'common-suite-launcher launch --suites' + suites
+CMD_INSTALL = 'zypper -n in dmidecode' + suites;
+CMD_LAUNCH  = 'common-suite-launcher launch --suites' + suites;
 
 
 conn.on('ready', function() {
@@ -246,7 +314,7 @@ conn.on('ready', function() {
             			if (code === 0) {
                 			logger_target.debug('Test suites successfully executed');
 							var ndl = 2;
-							function dlend(err) {
+							function dlend_cb(err) {
 								ndl--;
 								if (ndl == 0){
 									conn.exec(QA.GLOBALS.remote_script, function(err, stream) {
@@ -267,6 +335,7 @@ conn.on('ready', function() {
 												if (err) throw err;
 												platformconf = getPlatformInfos(QA.GLOBALS.local_tzplconf);
 												console.log (platformconf);
+												sendReport(platformconf, args.suite, config.REPORTS[args.report], conn);
 											});
 										}).stderr.on('data', function (data) {
 											logger_target.error((''+data).replace('\n',''));
@@ -274,8 +343,8 @@ conn.on('ready', function() {
 									});
 								}
 							}
-							getFile(conn, QA.GLOBALS.remote_txtres, QA.GLOBALS.local_txtres, dlend);
-							getFile(conn, QA.GLOBALS.remote_xmlres, QA.GLOBALS.local_xmlres, dlend);
+							getFile(conn, QA.GLOBALS.remote_txtres, QA.GLOBALS.local_txtres, dlend_cb);
+							getFile(conn, QA.GLOBALS.remote_xmlres, QA.GLOBALS.local_xmlres, dlend_cb);
 						}
             			else{
                 			logger_target.error('Cannot execute the tests');
